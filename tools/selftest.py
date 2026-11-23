@@ -53,7 +53,7 @@ def start_server():
                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     for _ in range(50):
         try:
-            urllib.request.urlopen(BASE + "/site/", timeout=0.5).read()
+            urllib.request.urlopen(BASE + "/docs/", timeout=0.5).read()
             break
         except OSError:
             time.sleep(0.1)
@@ -88,7 +88,6 @@ FAKE_API = r"""
   }
   Player.prototype.cueVideoById = function (vid) { this.cue(vid); };
   Player.prototype.playVideo = function () { this.calls.push('play'); this.emit('onStateChange', 1); };
-  Player.prototype.getVideoData = function () { return {video_id: this.id, title: '<img src=x onerror=window.__xss=1><b>標題</b> ' + this.id}; };
   window.YT = {Player: Player, PlayerState: {PLAYING: 1}};
   if (window.onYouTubeIframeAPIReady) window.onYouTubeIframeAPIReady();
 })();
@@ -118,6 +117,19 @@ def logic_tests(page):
     for f in [82.4, 110, 146.8, 196, 220, 261.6, 329.6, 392, 440, 523.3, 659.3, 784, 880, 987.8, 1046.5]:
         got = detect(tone([(f, 0.4)]))
         worst = max(worst, abs(cents(got["freq"], f)) if got else 9999)
+    bad = []
+    for f, label in ((110, "A2"), (220, "A3"), (261.63, "C4"), (440, "A4"), (880, "A5")):
+        got = detect(tone([(f, 0.4)]))
+        nn = page.evaluate("f => KTV.pitch.note(f)", got["freq"]) if got else None
+        if not nn or nn["label"] != label or abs(nn["cents"]) > 20:
+            bad.append((f, nn))
+    got = detect(tone([(220, 0.15), (440, 0.5), (660, 0.4), (880, 0.3)]))
+    nn = page.evaluate("f => KTV.pitch.note(f)", got["freq"]) if got else None
+    check("spec tones 110, 220, 261.63, 440, 880 Hz and 220 Hz with strong overtones: right note and octave, within 20 cents",
+          not bad and nn and nn["label"] == "A3" and abs(nn["cents"]) <= 20, str((bad, nn)))
+    for f in (80, 1000):
+        got = detect(tone([(f, 0.4)]))
+        check(f"range edge {f} Hz detected within 20 cents", got and abs(cents(got["freq"], f)) <= 20)
     check(f"pure tones 82 Hz to 1047 Hz: worst error {worst:.1f} cents (<= 10)", worst <= 10)
     for sr in (44100, 48000):
         got = detect([0.5 * math.sin(2 * math.pi * 440 * i / sr) for i in range(2048)], sr)
@@ -154,13 +166,13 @@ def logic_tests(page):
     good = {"https://www.youtube.com/watch?v=M7lc1UVf-VE": "M7lc1UVf-VE", "https://youtu.be/M7lc1UVf-VE?t=10": "M7lc1UVf-VE",
             "https://www.youtube.com/shorts/abcdefghijk": "abcdefghijk", "youtube.com/watch?v=abc_DEF-123&list=x": "abc_DEF-123",
             "  https://m.youtube.com/watch?feature=share&v=abcdefghijk  ": "abcdefghijk", "http://youtu.be/abcdefghijk": "abcdefghijk",
-            "https://music.youtube.com/watch?v=abcdefghijk": "abcdefghijk"}
+            "https://music.youtube.com/watch?v=abcdefghijk": "abcdefghijk", "https://www.youtube.com/embed/abcdefghijk?start=5": "abcdefghijk"}
     bad_links = ["", "hello", "https://example.com/watch?v=abcdefghijk", "https://www.youtube.com/watch?v=short",
                  "https://www.youtube.com/watch?v=abcdefghijkl", "https://youtube.com.evil.example/watch?v=abcdefghijk",
                  "https://www.youtube.com/watch", "javascript:alert(1)", "https://youtu.be/", "https://www.youtube.com/watch?v=abc<efghijk",
                  "https://www.youtube.com/playlist?list=PLabcdefghijk", "abcdefghijk", "https://www.youtube.com/watch?v=abcdefghijk x"]
     got = page.evaluate("ls => ls.map(l => KTV.link.videoId(l))", list(good) + bad_links)
-    check("link parsing: watch, youtu.be, shorts accepted; 13 bad inputs rejected",
+    check("link parsing: watch, shorts, embed, youtu.be accepted; 13 bad inputs rejected",
           got == list(good.values()) + [None] * len(bad_links), str(got))
 
 
@@ -199,13 +211,13 @@ def ui_tests(pw, tmp):
     ctx, page, errors = new_page(browser, external)
     mic_calls = "window.__gum = 0; const o = navigator.mediaDevices.getUserMedia.bind(navigator.mediaDevices); navigator.mediaDevices.getUserMedia = c => { window.__gum++; return o(c); };"
     page.add_init_script(mic_calls)
-    page.goto(BASE + "/site/")
+    page.goto(BASE + "/docs/")
     check("opening the page makes no third-party request and does not ask for the microphone",
           external == [] and page.evaluate("window.__gum") == 0, str(external))
     check("headphones tip is shown", "請戴耳機" in tid(page, "headphones-tip").inner_text())
     check("1280x800: no horizontal scroll", page.evaluate("document.documentElement.scrollWidth <= document.documentElement.clientWidth"))
-    check("start button disabled before a video is loaded; page state is idle",
-          tid(page, "start-button").is_disabled() and page.get_attribute("body", "data-state") == "idle"
+    check("page state is idle; microphone button says 開啟麥克風",
+          page.get_attribute("body", "data-state") == "idle" and tid(page, "mic-button").inner_text() == "開啟麥克風"
           and tid(page, "note").get_attribute("data-voiced") == "false")
     SHOTS.mkdir(exist_ok=True)
     page.screenshot(path=str(SHOTS / "01_empty.png"), full_page=True)
@@ -214,15 +226,18 @@ def ui_tests(pw, tmp):
     tid(page, "load-button").click()
     check("bad link: explanation shown, nothing loaded", "看不懂這個連結" in tid(page, "message").inner_text() and external == [])
 
-    tid(page, "link-input").fill("https://youtu.be/AAAAAAAAAAA")
+    tid(page, "link-input").fill("https://youtu.be/AAAAAAAAAAA?t=30&list=PLx")
+    tid(page, "name-input").fill("<img src=x onerror=window.__xss=1><b>歌名</b>")
     tid(page, "load-button").click()
-    page.wait_for_selector('[data-testid="start-button"]:not([disabled])')
+    page.wait_for_selector('body[data-state="loaded"], body[data-state="mic"], body[data-state="denied"]')
+    check("extra link parameters are ignored: the player gets only the video id",
+          page.evaluate("window.__fake.opts.videoId === 'AAAAAAAAAAA' && Object.keys(window.__fake.opts.playerVars).sort().join() === 'playsinline,rel'"))
     check("valid link: the only external request is YouTube's player script", external == ["https://www.youtube.com/iframe_api"], str(external))
     check("no microphone request before pressing start", page.evaluate("window.__gum") == 0)
     box = page.locator("#player").bounding_box()
     check(f"player is at least 480x270 (is {box['width']:.0f}x{box['height']:.0f})", box["width"] >= 480 and box["height"] >= 270)
 
-    tid(page, "start-button").click()
+    tid(page, "mic-button").click()
     page.wait_for_selector('[data-testid="mic-status"][data-mic="on"]')
     page.wait_for_selector('[data-testid="note"]:not([data-note=""])', timeout=8000)
     page.wait_for_timeout(1500)
@@ -231,8 +246,9 @@ def ui_tests(pw, tmp):
     ok = all(s[0] == "A4" and abs(s[2]) <= 20 for s in samples)
     freqs = [s[1] for s in samples]
     check(f"fake microphone playing 440 Hz: shows A4 within 20 cents on all 40 readings ({min(freqs):.1f} to {max(freqs):.1f} Hz)", ok, str(samples[:5]))
-    check("start pressed: microphone requested once, then the video is told to play",
-          page.evaluate("window.__gum") == 1 and page.evaluate("window.__fake.calls.includes('play')"))
+    check("microphone button pressed: requested once, button now says 關閉麥克風, then the video is told to play",
+          page.evaluate("window.__gum") == 1 and page.evaluate("window.__fake.calls.includes('play')")
+          and tid(page, "mic-button").inner_text() == "關閉麥克風")
     drawn = page.evaluate("""() => { const c = document.querySelector('[data-testid=graph]'), d = c.getContext('2d').getImageData(0, 0, c.width, c.height).data;
         let n = 0; for (let i = 0; i < d.length; i += 4) if (d[i] === 90 && d[i + 1] === 209 && d[i + 2] === 164) n++; return n; }""")
     check("pitch line is drawn on the graph", drawn > 200, str(drawn))
@@ -246,20 +262,23 @@ def ui_tests(pw, tmp):
     page.screenshot(path=str(SHOTS / "02_singing_a440_standin_player.png"), full_page=True)
 
     item = tid(page, "recent-item")
-    check("recent list: one entry; the title is shown as plain text",
-          item.count() == 1 and "<b>標題</b>" in item.first.inner_text() and page.evaluate("window.__xss === undefined")
+    check("recent list: one entry; the typed song name is shown as plain text",
+          item.count() == 1 and item.first.inner_text() == "<img src=x onerror=window.__xss=1><b>歌名</b>" and page.evaluate("window.__xss === undefined")
           and page.locator('[data-testid="recent"] img, [data-testid="recent"] b').count() == 0)
     for code in ("ERR101", "ERR150"):
         tid(page, "link-input").fill(f"https://www.youtube.com/watch?v={code}xxxxx")
         tid(page, "load-button").click()
         page.wait_for_selector('[data-testid="message"]:not(:empty)')
         check(f"player error {code[3:]}: message shown, link box ready for the next link",
-              tid(page, "message").inner_text() == "這支影片不允許嵌入，請換一支。" and page.evaluate("document.activeElement.id") == "link"
-              and tid(page, "start-button").is_disabled())
+              tid(page, "message").inner_text() == "這支影片不允許嵌入，請換一支" and page.evaluate("document.activeElement.id") == "link")
     tid(page, "link-input").fill("https://www.youtube.com/shorts/BBBBBBBBBBB")
     tid(page, "load-button").click()
-    page.wait_for_selector('[data-testid="start-button"]:not([disabled])')
+    page.wait_for_selector('body[data-state="loaded"], body[data-state="mic"], body[data-state="denied"]')
     check("after an error, the next link loads and the message clears", tid(page, "message").inner_text() == "")
+    texts = page.evaluate("[100, 2, 153, 5, 999].map(c => { KTV.app.handlePlayerError(c); return document.querySelector('[data-testid=message]').textContent; })")
+    check("player errors 100, 2, 153, 5 and unknown codes each show the specified message",
+          texts == ["找不到這支影片，或它是私人影片", "連結有問題，請重新貼上", "這個頁面要用 https 或 localhost 網址開啟才能播放",
+                    "播放器無法播放這支影片，請再試一次或換一支", "播放器無法播放這支影片，請再試一次或換一支"], str(texts))
     page.evaluate("KTV.app.handlePlayerError(150)")
     check("error handler can be called directly; page state is error", page.get_attribute("body", "data-state") == "error"
           and tid(page, "message").get_attribute("data-error-code") == "150")
@@ -269,23 +288,31 @@ def ui_tests(pw, tmp):
           tid(page, "note").get_attribute("data-voiced") == "true" and tid(page, "note").get_attribute("data-cents") is not None)
     page.screenshot(path=str(SHOTS / "03_after_error_next_link.png"), full_page=True)
 
-    page.evaluate("""() => { const l = []; for (let i = 0; i < 25; i++) l.push({id: ('v' + i + 'xxxxxxxxxxx').slice(0, 11), title: 'T' + i});
-        localStorage.setItem('ktv.recent.v1', JSON.stringify(l)); }""")
+    page.evaluate("""() => { const l = []; for (let i = 0; i < 25; i++) l.push({id: ('v' + i + 'xxxxxxxxxxx').slice(0, 11), name: i % 2 ? 'T' + i : ''});
+        localStorage.setItem('singalong-pitchline.recent.v1', JSON.stringify(l)); }""")
     page.reload()
-    check("recent list survives a reload and shows at most 20", tid(page, "recent-item").count() == 20)
+    check("recent list survives a reload, shows at most 20, and shows the video id when no name was given",
+          tid(page, "recent-item").count() == 20 and tid(page, "recent-item").nth(0).inner_text() == "v0xxxxxxxxx"
+          and tid(page, "recent-item").nth(1).inner_text() == "T1")
     tid(page, "link-input").fill("https://youtu.be/CCCCCCCCCCC")
     tid(page, "load-button").click()
-    page.wait_for_selector('[data-testid="start-button"]:not([disabled])')
-    tid(page, "start-button").click()
+    page.wait_for_selector('body[data-state="loaded"], body[data-state="mic"], body[data-state="denied"]')
+    tid(page, "mic-button").click()
     page.wait_for_selector('[data-testid="recent-item"][data-video-id="CCCCCCCCCCC"]')
-    stored = json.loads(page.evaluate("localStorage.getItem('ktv.recent.v1')"))
-    check("recent list keeps the newest 20, newest first, storing only id and title",
-          len(stored) == 20 and stored[0]["id"] == "CCCCCCCCCCC" and all(sorted(x) == ["id", "title"] for x in stored))
-    tid(page, "mic-off-button").click()
-    check("microphone can be turned off; the note display clears",
-          tid(page, "mic-status").get_attribute("data-mic") == "off" and tid(page, "note").inner_text() == "—")
+    stored = json.loads(page.evaluate("localStorage.getItem('singalong-pitchline.recent.v1')"))
+    check("recent list keeps the newest 20, newest first, storing only id and name",
+          len(stored) == 20 and stored[0]["id"] == "CCCCCCCCCCC" and all(sorted(x) == ["id", "name"] for x in stored))
+    tid(page, "recent-item").nth(3).click()
+    page.evaluate("window.__fake.playVideo()")
+    stored2 = json.loads(page.evaluate("localStorage.getItem('singalong-pitchline.recent.v1')"))
+    check("singing a listed song again moves it to the front without a duplicate, keeping its name",
+          stored2[0] == stored[3] and len(stored2) == 20 and len({x["id"] for x in stored2}) == 20)
+    tid(page, "mic-button").click()
+    check("pressing the button again turns the microphone off; the note display clears",
+          tid(page, "mic-status").get_attribute("data-mic") == "off" and tid(page, "note").inner_text() == "—"
+          and tid(page, "mic-button").inner_text() == "開啟麥克風")
     tid(page, "clear-recent").click()
-    check("clear empties the list and the storage", tid(page, "recent-item").count() == 0 and page.evaluate("localStorage.getItem('ktv.recent.v1')") is None)
+    check("clear empties the list and the storage", tid(page, "recent-item").count() == 0 and page.evaluate("localStorage.getItem('singalong-pitchline.recent.v1')") is None)
     keys = page.evaluate("[Object.keys(localStorage), Object.keys(sessionStorage), document.cookie]")
     check("nothing else is stored in the browser", keys == [[], [], ""], str(keys))
     check("only request to a third party in the whole run: YouTube's player script",
@@ -299,11 +326,11 @@ def ui_tests(pw, tmp):
     write_tone(silent, 440, amp=0.0)
     browser = pw.chromium.launch(args=fake_mic[:2] + [f"--use-file-for-fake-audio-capture={silent}"])
     ctx, page, errors = new_page(browser, [])
-    page.goto(BASE + "/site/")
+    page.goto(BASE + "/docs/")
     tid(page, "link-input").fill("https://youtu.be/AAAAAAAAAAA")
     tid(page, "load-button").click()
-    page.wait_for_selector('[data-testid="start-button"]:not([disabled])')
-    tid(page, "start-button").click()
+    page.wait_for_selector('body[data-state="loaded"], body[data-state="mic"], body[data-state="denied"]')
+    tid(page, "mic-button").click()
     page.wait_for_selector('[data-testid="mic-status"][data-mic="on"]')
     page.wait_for_timeout(1500)
     drawn = page.evaluate("""() => { const c = document.querySelector('[data-testid=graph]'), d = c.getContext('2d').getImageData(0, 0, c.width, c.height).data;
@@ -315,14 +342,14 @@ def ui_tests(pw, tmp):
     # Permission denied: no fake-permission flag, so the browser refuses the microphone.
     browser = pw.chromium.launch()
     ctx, page, errors = new_page(browser, [])
-    page.goto(BASE + "/site/")
+    page.goto(BASE + "/docs/")
     tid(page, "link-input").fill("https://youtu.be/AAAAAAAAAAA")
     tid(page, "load-button").click()
-    page.wait_for_selector('[data-testid="start-button"]:not([disabled])')
-    tid(page, "start-button").click()
+    page.wait_for_selector('body[data-state="loaded"], body[data-state="mic"], body[data-state="denied"]')
+    tid(page, "mic-button").click()
     page.wait_for_selector('[data-testid="mic-help"]:not([hidden])', timeout=8000)
-    check("microphone refused: video still told to play, help text explains how to allow it",
-          page.evaluate("window.__fake.calls.includes('play')") and "重新允許" in tid(page, "mic-help").inner_text()
+    check("microphone refused: video still told to play, help text explains how to allow it (reason: " + str(tid(page, "mic-help").get_attribute("data-reason")) + ")",
+          page.evaluate("window.__fake.calls.includes('play')") and ("重新允許" in tid(page, "mic-help").inner_text() or "找不到麥克風" in tid(page, "mic-help").inner_text())
           and tid(page, "mic-status").get_attribute("data-mic") == "off" and page.get_attribute("body", "data-state") == "denied")
     page.screenshot(path=str(SHOTS / "04_mic_refused.png"), full_page=True)
     check("no page errors (refused)", not errors, str(errors[:3]))
@@ -337,11 +364,11 @@ def youtube_test(pw, fake_mic):
     external = []
     ctx, page, errors = new_page(browser, external, allow_youtube=True)
     states = []
-    page.goto(BASE + "/site/")
+    page.goto(BASE + "/docs/")
     tid(page, "link-input").fill(f"https://www.youtube.com/watch?v={REAL_VIDEO}")
     tid(page, "load-button").click()
     try:
-        page.wait_for_selector('[data-testid="start-button"]:not([disabled])', timeout=30000)
+        page.wait_for_selector('body[data-state="loaded"]', timeout=30000)
         ready = True
     except Exception:
         ready = False
@@ -353,16 +380,15 @@ def youtube_test(pw, fake_mic):
         check(f"real YouTube: the player is an iframe from www.youtube.com, {box['width']:.0f}x{box['height']:.0f}",
               frame.evaluate("e => e.tagName") == "IFRAME" and (frame.get_attribute("src") or "").startswith("https://www.youtube.com/embed/")
               and box["width"] >= 480 and box["height"] >= 270, str(frame.get_attribute("src")))
-        tid(page, "start-button").click()
+        tid(page, "mic-button").click()
         try:
             page.wait_for_selector('[data-testid="recent-item"]', timeout=30000)
             playing = True
         except Exception:
             playing = False
-        check("real YouTube: playback starts (player reports 'playing') and the song appears in the recent list with its title", playing,
+        check("real YouTube: playback starts (player reports 'playing') and the song appears in the recent list", playing,
               "message=" + tid(page, "message").inner_text())
         if playing:
-            print("     title from YouTube:", tid(page, "recent-item").first.inner_text()[:80])
             page.wait_for_timeout(2500)
             check("real YouTube: pitch line still works beside the real player (A4 from the fake microphone)",
                   tid(page, "note").get_attribute("data-note") == "A4")

@@ -2,7 +2,7 @@
 <html lang="zh-Hant">
 <head>
 <meta charset="utf-8">
-<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self' https://www.youtube.com; frame-src https://www.youtube.com; style-src 'self'; img-src 'self'; base-uri 'none'; form-action 'none'">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self' https://www.youtube.com; frame-src https://www.youtube.com; style-src 'self'; img-src 'self'; connect-src 'none'; base-uri 'none'; form-action 'none'">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>跟唱音高線</title>
 <link rel="stylesheet" href="style.css">
@@ -20,6 +20,8 @@
       <input id="link" data-testid="link-input" type="text" inputmode="url" autocomplete="off" spellcheck="false" placeholder="https://www.youtube.com/watch?v=…">
       <button id="load" data-testid="load-button" type="button">載入</button>
     </div>
+    <label for="song-name" class="second">歌名（可不填，只用來記在「最近唱過」）</label>
+    <input id="song-name" data-testid="name-input" type="text" autocomplete="off" maxlength="80">
     <p id="message" class="message" data-testid="message" role="status"></p>
   </section>
 
@@ -28,8 +30,7 @@
   </section>
 
   <section class="row controls">
-    <button id="start" data-testid="start-button" type="button" disabled>開始（開啟麥克風並播放）</button>
-    <button id="mic-off" data-testid="mic-off-button" type="button" class="secondary" hidden>關閉麥克風</button>
+    <button id="mic" data-testid="mic-button" type="button">開啟麥克風</button>
     <span id="mic-status" class="mic-status" data-testid="mic-status" data-mic="off">麥克風未開啟</span>
   </section>
   <p id="mic-help" class="message" data-testid="mic-help" role="status" hidden></p>

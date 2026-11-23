@@ -1,22 +1,22 @@
-/* Page logic. Text from the user or from YouTube (links, video titles) is only ever
+/* Page logic. Text from the user or from storage (links, song names) is only ever
  * written with textContent. Microphone audio is analysed live in this page and then
  * discarded: nothing is recorded, stored or sent anywhere. */
 (function () {
   "use strict";
   var K = window.KTV;
-  var RECENT_KEY = "ktv.recent.v1";     // localStorage: [{id, title}], newest first
+  var RECENT_KEY = "singalong-pitchline.recent.v1";   // localStorage: [{id, name}], newest first
   var RECENT_MAX = 20;
   var HISTORY_MS = 8000;                // how much of the pitch line stays on screen
   var MIDI_LOW = 36, MIDI_HIGH = 84;    // C2 .. C6 on the graph
   var FFT_SIZE = 2048;                  // about 43 ms of audio at 48 kHz
 
   function $(id) { return document.getElementById(id); }
-  var linkInput = $("link"), loadBtn = $("load"), message = $("message");
-  var startBtn = $("start"), micOffBtn = $("mic-off"), micStatus = $("mic-status"), micHelp = $("mic-help");
+  var linkInput = $("link"), nameInput = $("song-name"), loadBtn = $("load"), message = $("message");
+  var micBtn = $("mic"), micStatus = $("mic-status"), micHelp = $("mic-help");
   var noteEl = $("note"), centsEl = $("cents"), canvas = $("graph");
   var recentList = $("recent"), recentEmpty = $("recent-empty"), clearBtn = $("clear-recent");
 
-  var player = null, apiState = "none", pendingId = null, currentId = null;
+  var player = null, apiState = "none", pendingId = null, currentId = null, currentName = "";
   var audioCtx = null, analyser = null, micStream = null, buffer = null, rafId = 0;
   var history = [];                     // [{t, midi|null}]
   var loaded = false, failed = false, denied = false;
@@ -36,16 +36,19 @@
       var list = JSON.parse(localStorage.getItem(RECENT_KEY) || "[]");
       if (!Array.isArray(list)) return [];
       return list.filter(function (x) {
-        return x && typeof x.id === "string" && /^[A-Za-z0-9_-]{11}$/.test(x.id) && typeof x.title === "string";
+        return x && typeof x.id === "string" && /^[A-Za-z0-9_-]{11}$/.test(x.id) && typeof x.name === "string";
       }).slice(0, RECENT_MAX);
     } catch (e) { return []; }
   }
   function writeRecent(list) {
     try { localStorage.setItem(RECENT_KEY, JSON.stringify(list.slice(0, RECENT_MAX))); } catch (e) { /* storage unavailable */ }
   }
-  function addRecent(id, title) {
-    var list = readRecent().filter(function (x) { return x.id !== id; });
-    list.unshift({ id: id, title: String(title || id).slice(0, 200) });
+  // The name is whatever the user typed (may be empty). Nothing is looked up on YouTube.
+  function addRecent(id, name) {
+    var old = readRecent(), prev = old.filter(function (x) { return x.id === id; })[0];
+    var list = old.filter(function (x) { return x.id !== id; });
+    name = String(name || "").trim().slice(0, 80);
+    list.unshift({ id: id, name: name || (prev ? prev.name : "") });
     writeRecent(list);
     renderRecent();
   }
@@ -58,8 +61,8 @@
       b.type = "button";
       b.setAttribute("data-testid", "recent-item");
       b.setAttribute("data-video-id", item.id);
-      b.textContent = item.title;
-      b.addEventListener("click", function () { loadVideo(item.id); });
+      b.textContent = item.name || item.id;
+      b.addEventListener("click", function () { nameInput.value = item.name; loadVideo(item.id, item.name); });
       li.appendChild(b);
       recentList.appendChild(li);
     });
@@ -95,39 +98,35 @@
       events: { onReady: onReady, onError: onError, onStateChange: onStateChange }
     });
   }
-  function onReady() { startBtn.disabled = false; loaded = true; refreshState(); }
+  function onReady() { loaded = true; refreshState(); }
   function onError(ev) {
     handlePlayerError(ev && ev.data);
   }
   function handlePlayerError(code) {
-    startBtn.disabled = true;
     failed = true;
-    if (code === 101 || code === 150) say("這支影片不允許嵌入，請換一支。");
-    else if (code === 100) say("找不到這支影片（可能已移除或設為私人），請換一支。");
-    else if (code === 2) say("這個連結的影片代碼無效，請換一支。");
-    else say("這支影片無法播放（錯誤代碼 " + Number(code) + "），請換一支。");
+    if (code === 101 || code === 150) say("這支影片不允許嵌入，請換一支");
+    else if (code === 100) say("找不到這支影片，或它是私人影片");
+    else if (code === 2) say("連結有問題，請重新貼上");
+    else if (code === 153) say("這個頁面要用 https 或 localhost 網址開啟才能播放");
+    else say("播放器無法播放這支影片，請再試一次或換一支");
     message.setAttribute("data-error-code", String(Number(code)));
     refreshState();
     linkInput.focus();
     linkInput.select();
   }
   function onStateChange(ev) {
-    if (ev && ev.data === 1 && currentId) {          // 1 = playing
-      var title = "";
-      try { title = (player.getVideoData && player.getVideoData().title) || ""; } catch (e) { title = ""; }
-      addRecent(currentId, title || currentId);
-    }
+    if (ev && ev.data === 1 && currentId) addRecent(currentId, currentName);   // 1 = playing
   }
-  function loadVideo(id) {
+  function loadVideo(id, name) {
     currentId = id;
+    currentName = name || "";
     failed = false;
     say("");
     refreshState();
     if (player && player.cueVideoById) {
-      startBtn.disabled = false;
       loaded = true;
       refreshState();
-      player.cueVideoById(id);
+      player.cueVideoById(id);       // only the video id is passed: no start time, no playlist
     } else {
       pendingId = id;
       if (apiState === "ready") createPlayer(id); else loadApi();
@@ -139,7 +138,7 @@
       say("看不懂這個連結。請貼上 YouTube 影片的網址，例如 https://www.youtube.com/watch?v=… 、https://youtu.be/… 或 https://www.youtube.com/shorts/… 。");
       return;
     }
-    loadVideo(id);
+    loadVideo(id, nameInput.value);
   }
   loadBtn.addEventListener("click", onLoadClick);
   linkInput.addEventListener("keydown", function (ev) { if (ev.key === "Enter") onLoadClick(); });
@@ -148,12 +147,13 @@
   function setMic(on) {
     micStatus.setAttribute("data-mic", on ? "on" : "off");
     micStatus.textContent = on ? "麥克風已開啟" : "麥克風未開啟";
-    micOffBtn.hidden = !on;
+    micBtn.textContent = on ? "關閉麥克風" : "開啟麥克風";
     refreshState();
   }
+  // Resolves to "on", "denied" or "nodevice".
   function openMic() {
-    if (micStream) return Promise.resolve(true);
-    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) return Promise.resolve(false);
+    if (micStream) return Promise.resolve("on");
+    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) return Promise.resolve("nodevice");
     return navigator.mediaDevices.getUserMedia({
       audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false }, video: false
     }).then(function (stream) {
@@ -170,11 +170,14 @@
       setMic(true);
       micHelp.hidden = true;
       if (!rafId) rafId = requestAnimationFrame(tick);
-      return true;
-    }).catch(function () { return false; });
+      return "on";
+    }).catch(function (err) {
+      var n = err && err.name;
+      return n === "NotFoundError" || n === "DevicesNotFoundError" || n === "OverconstrainedError" ? "nodevice" : "denied";
+    });
   }
   function closeMic() {
-    if (micStream) micStream.getTracks().forEach(function (t) { t.stop(); });
+    if (micStream) micStream.getTracks().forEach(function (t) { t.stop(); });   // releases the device
     if (audioCtx) { try { audioCtx.close(); } catch (e) { /* ignore */ } }
     micStream = null; audioCtx = null; analyser = null; buffer = null;
     if (rafId) cancelAnimationFrame(rafId);
@@ -184,18 +187,21 @@
     draw(performance.now());
     setMic(false);
   }
-  micOffBtn.addEventListener("click", closeMic);
-
-  startBtn.addEventListener("click", function () {
+  micBtn.addEventListener("click", function () {
+    if (micStream) return closeMic();
     // The permission prompt appears only here, after the user presses the button.
-    openMic().then(function (ok) {
-      if (!ok) {
+    openMic().then(function (result) {
+      if (result !== "on") {
         denied = true;
         refreshState();
         micHelp.hidden = false;
-        micHelp.textContent = "麥克風沒有開啟，影片照常播放，但不會有音高線。要重新允許：點網址列左邊的圖示 → 網站設定 → 麥克風 → 允許，再重新整理這個頁面。";
+        micHelp.setAttribute("data-reason", result);
+        micHelp.textContent = result === "nodevice"
+          ? "找不到麥克風裝置。影片照常播放，但不會有音高線。請接上麥克風後再按一次「開啟麥克風」。"
+          : "麥克風沒有開啟。影片照常播放，但不會有音高線。要重新允許：點網址列左邊的圖示 → 網站設定 → 麥克風 → 允許，再重新整理這個頁面。";
       }
-      if (player && player.playVideo) player.playVideo();
+      // The song starts once the microphone question is settled, whatever the answer was.
+      if (player && player.playVideo && loaded && !failed) player.playVideo();
     });
   });
 

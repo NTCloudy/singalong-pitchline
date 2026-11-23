@@ -6,7 +6,8 @@
   var HOSTS = { "youtube.com": 1, "www.youtube.com": 1, "m.youtube.com": 1, "music.youtube.com": 1 };
 
   /* videoId(text) -> the 11-character video id, or null.
-   * Accepts watch?v=, youtu.be/ and /shorts/ links (with or without https://). */
+   * Accepts watch?v=, /shorts/, /embed/ and youtu.be/ links (with or without https://).
+   * Every other parameter (t, list, si ...) is ignored. */
   function videoId(text) {
     if (typeof text !== "string") return null;
     var s = text.trim();
@@ -21,7 +22,7 @@
     } else if (HOSTS[host]) {
       var parts = u.pathname.split("/");
       if (u.pathname === "/watch") id = u.searchParams.get("v") || "";
-      else if (parts[1] === "shorts") id = parts[2] || "";
+      else if (parts[1] === "shorts" || parts[1] === "embed") id = parts[2] || "";
     }
     return id && ID.test(id) ? id : null;
   }
