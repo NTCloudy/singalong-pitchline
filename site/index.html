@@ -1,0 +1,56 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self' https://www.youtube.com; frame-src https://www.youtube.com; style-src 'self'; img-src 'self'; base-uri 'none'; form-action 'none'">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>跟唱音高線</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header>
+  <h1>跟唱音高線</h1>
+  <p class="lead">貼上 YouTube 連結，跟著唱，下方會畫出你自己的即時音高。不評分、不登入。</p>
+  <p class="tip" data-testid="headphones-tip">請戴耳機：喇叭播出的歌聲會被麥克風當成你的聲音。</p>
+</header>
+<main>
+  <section class="row">
+    <label for="link">YouTube 連結</label>
+    <div class="link-row">
+      <input id="link" data-testid="link-input" type="text" inputmode="url" autocomplete="off" spellcheck="false" placeholder="https://www.youtube.com/watch?v=…">
+      <button id="load" data-testid="load-button" type="button">載入</button>
+    </div>
+    <p id="message" class="message" data-testid="message" role="status"></p>
+  </section>
+
+  <section id="stage" class="stage" data-testid="stage">
+    <div id="player-box" class="player-box" data-testid="player-box"><div id="player"></div></div>
+  </section>
+
+  <section class="row controls">
+    <button id="start" data-testid="start-button" type="button" disabled>開始（開啟麥克風並播放）</button>
+    <button id="mic-off" data-testid="mic-off-button" type="button" class="secondary" hidden>關閉麥克風</button>
+    <span id="mic-status" class="mic-status" data-testid="mic-status" data-mic="off">麥克風未開啟</span>
+  </section>
+  <p id="mic-help" class="message" data-testid="mic-help" role="status" hidden></p>
+
+  <section class="pitch" data-testid="pitch-area">
+    <div class="now"><span id="note" class="note" data-testid="note" data-note="">—</span><span id="cents" class="cents" data-testid="cents"></span></div>
+    <canvas id="graph" data-testid="graph" width="1000" height="220" aria-label="即時音高線"></canvas>
+    <p class="hint">音高線只畫你的聲音；麥克風的聲音只在這個瀏覽器裡即時分析，不錄音、不儲存、不上傳。</p>
+  </section>
+
+  <section class="recent">
+    <div class="recent-head">
+      <h2>最近唱過</h2>
+      <button id="clear-recent" data-testid="clear-recent" type="button" class="secondary">清空</button>
+    </div>
+    <ul id="recent" data-testid="recent"></ul>
+    <p id="recent-empty" class="hint" data-testid="recent-empty">還沒有紀錄。</p>
+  </section>
+</main>
+<script src="js/pitch.js"></script>
+<script src="js/link.js"></script>
+<script src="js/app.js"></script>
+</body>
+</html>

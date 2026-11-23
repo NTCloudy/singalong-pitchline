@@ -1,0 +1,250 @@
+/* Page logic. Text from the user or from YouTube (links, video titles) is only ever
+ * written with textContent. Microphone audio is analysed live in this page and then
+ * discarded: nothing is recorded, stored or sent anywhere. */
+(function () {
+  "use strict";
+  var K = window.KTV;
+  var RECENT_KEY = "ktv.recent.v1";     // localStorage: [{id, title}], newest first
+  var RECENT_MAX = 20;
+  var HISTORY_MS = 8000;                // how much of the pitch line stays on screen
+  var MIDI_LOW = 36, MIDI_HIGH = 84;    // C2 .. C6 on the graph
+  var FFT_SIZE = 2048;                  // about 43 ms of audio at 48 kHz
+
+  function $(id) { return document.getElementById(id); }
+  var linkInput = $("link"), loadBtn = $("load"), message = $("message");
+  var startBtn = $("start"), micOffBtn = $("mic-off"), micStatus = $("mic-status"), micHelp = $("mic-help");
+  var noteEl = $("note"), centsEl = $("cents"), canvas = $("graph");
+  var recentList = $("recent"), recentEmpty = $("recent-empty"), clearBtn = $("clear-recent");
+
+  var player = null, apiState = "none", pendingId = null, currentId = null;
+  var audioCtx = null, analyser = null, micStream = null, buffer = null, rafId = 0;
+  var history = [];                     // [{t, midi|null}]
+
+  // ---------- messages ---------------------------------------------------------
+  function say(text) { message.textContent = text || ""; message.removeAttribute("data-error-code"); }
+
+  // ---------- recent list --------------------------------------------------------
+  function readRecent() {
+    try {
+      var list = JSON.parse(localStorage.getItem(RECENT_KEY) || "[]");
+      if (!Array.isArray(list)) return [];
+      return list.filter(function (x) {
+        return x && typeof x.id === "string" && /^[A-Za-z0-9_-]{11}$/.test(x.id) && typeof x.title === "string";
+      }).slice(0, RECENT_MAX);
+    } catch (e) { return []; }
+  }
+  function writeRecent(list) {
+    try { localStorage.setItem(RECENT_KEY, JSON.stringify(list.slice(0, RECENT_MAX))); } catch (e) { /* storage unavailable */ }
+  }
+  function addRecent(id, title) {
+    var list = readRecent().filter(function (x) { return x.id !== id; });
+    list.unshift({ id: id, title: String(title || id).slice(0, 200) });
+    writeRecent(list);
+    renderRecent();
+  }
+  function renderRecent() {
+    var list = readRecent();
+    while (recentList.firstChild) recentList.removeChild(recentList.firstChild);
+    list.forEach(function (item) {
+      var li = document.createElement("li");
+      var b = document.createElement("button");
+      b.type = "button";
+      b.setAttribute("data-testid", "recent-item");
+      b.setAttribute("data-video-id", item.id);
+      b.textContent = item.title;
+      b.addEventListener("click", function () { loadVideo(item.id); });
+      li.appendChild(b);
+      recentList.appendChild(li);
+    });
+    recentEmpty.hidden = list.length > 0;
+    clearBtn.hidden = list.length === 0;
+  }
+  clearBtn.addEventListener("click", function () {
+    try { localStorage.removeItem(RECENT_KEY); } catch (e) { /* ignore */ }
+    renderRecent();
+  });
+
+  // ---------- YouTube player (the official IFrame API; the only third-party resource) ---
+  function loadApi() {
+    if (apiState !== "none") return;
+    apiState = "loading";
+    window.onYouTubeIframeAPIReady = function () {
+      apiState = "ready";
+      if (pendingId) createPlayer(pendingId);
+    };
+    var s = document.createElement("script");
+    s.src = "https://www.youtube.com/iframe_api";
+    s.onerror = function () {
+      apiState = "none";
+      say("無法載入 YouTube 播放器，請確認網路後再按一次「載入」。");
+    };
+    document.head.appendChild(s);
+  }
+  function createPlayer(id) {
+    pendingId = null;
+    player = new window.YT.Player("player", {
+      width: "640", height: "360", videoId: id,
+      playerVars: { playsinline: 1, rel: 0 },
+      events: { onReady: onReady, onError: onError, onStateChange: onStateChange }
+    });
+  }
+  function onReady() { startBtn.disabled = false; }
+  function onError(ev) {
+    var code = ev && ev.data;
+    startBtn.disabled = true;
+    if (code === 101 || code === 150) say("這支影片不允許嵌入，請換一支。");
+    else if (code === 100) say("找不到這支影片（可能已移除或設為私人），請換一支。");
+    else if (code === 2) say("這個連結的影片代碼無效，請換一支。");
+    else say("這支影片無法播放（錯誤代碼 " + Number(code) + "），請換一支。");
+    message.setAttribute("data-error-code", String(Number(code)));
+    linkInput.focus();
+    linkInput.select();
+  }
+  function onStateChange(ev) {
+    if (ev && ev.data === 1 && currentId) {          // 1 = playing
+      var title = "";
+      try { title = (player.getVideoData && player.getVideoData().title) || ""; } catch (e) { title = ""; }
+      addRecent(currentId, title || currentId);
+    }
+  }
+  function loadVideo(id) {
+    currentId = id;
+    say("");
+    if (player && player.cueVideoById) {
+      startBtn.disabled = false;
+      player.cueVideoById(id);
+    } else {
+      pendingId = id;
+      if (apiState === "ready") createPlayer(id); else loadApi();
+    }
+  }
+  function onLoadClick() {
+    var id = K.link.videoId(linkInput.value);
+    if (!id) {
+      say("看不懂這個連結。請貼上 YouTube 影片的網址，例如 https://www.youtube.com/watch?v=… 、https://youtu.be/… 或 https://www.youtube.com/shorts/… 。");
+      return;
+    }
+    loadVideo(id);
+  }
+  loadBtn.addEventListener("click", onLoadClick);
+  linkInput.addEventListener("keydown", function (ev) { if (ev.key === "Enter") onLoadClick(); });
+
+  // ---------- microphone ---------------------------------------------------------
+  function setMic(on) {
+    micStatus.setAttribute("data-mic", on ? "on" : "off");
+    micStatus.textContent = on ? "麥克風已開啟" : "麥克風未開啟";
+    micOffBtn.hidden = !on;
+  }
+  function openMic() {
+    if (micStream) return Promise.resolve(true);
+    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) return Promise.resolve(false);
+    return navigator.mediaDevices.getUserMedia({
+      audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false }, video: false
+    }).then(function (stream) {
+      micStream = stream;
+      var Ctx = window.AudioContext || window.webkitAudioContext;
+      audioCtx = new Ctx();
+      analyser = audioCtx.createAnalyser();
+      analyser.fftSize = FFT_SIZE;
+      // The microphone goes into the analyser only. It is not connected to the speakers,
+      // to a recorder or to anything that leaves this page.
+      audioCtx.createMediaStreamSource(stream).connect(analyser);
+      buffer = new Float32Array(analyser.fftSize);
+      setMic(true);
+      micHelp.hidden = true;
+      if (!rafId) rafId = requestAnimationFrame(tick);
+      return true;
+    }).catch(function () { return false; });
+  }
+  function closeMic() {
+    if (micStream) micStream.getTracks().forEach(function (t) { t.stop(); });
+    if (audioCtx) { try { audioCtx.close(); } catch (e) { /* ignore */ } }
+    micStream = null; audioCtx = null; analyser = null; buffer = null;
+    if (rafId) cancelAnimationFrame(rafId);
+    rafId = 0;
+    history = [];
+    showNote(null);
+    draw(performance.now());
+    setMic(false);
+  }
+  micOffBtn.addEventListener("click", closeMic);
+
+  startBtn.addEventListener("click", function () {
+    // The permission prompt appears only here, after the user presses the button.
+    openMic().then(function (ok) {
+      if (!ok) {
+        micHelp.hidden = false;
+        micHelp.textContent = "麥克風沒有開啟，影片照常播放，但不會有音高線。要重新允許：點網址列左邊的圖示 → 網站設定 → 麥克風 → 允許，再重新整理這個頁面。";
+      }
+      if (player && player.playVideo) player.playVideo();
+    });
+  });
+
+  // ---------- pitch line -----------------------------------------------------------
+  function showNote(n) {
+    if (!n) {
+      noteEl.textContent = "—";
+      noteEl.setAttribute("data-note", "");
+      noteEl.removeAttribute("data-freq");
+      centsEl.textContent = "";
+      centsEl.removeAttribute("data-cents");
+      return;
+    }
+    noteEl.textContent = n.label;
+    noteEl.setAttribute("data-note", n.label);
+    noteEl.setAttribute("data-freq", n.freq.toFixed(2));
+    centsEl.textContent = (n.cents > 0 ? "+" : "") + n.cents + " 音分";
+    centsEl.setAttribute("data-cents", String(n.cents));
+  }
+  function tick(now) {
+    rafId = requestAnimationFrame(tick);
+    if (!analyser) return;
+    analyser.getFloatTimeDomainData(buffer);
+    var p = K.pitch.detect(buffer, audioCtx.sampleRate);
+    var n = null;
+    if (p) { n = K.pitch.note(p.freq); n.freq = p.freq; }
+    history.push({ t: now, midi: n ? n.midi : null });   // null = silence: a gap in the line
+    while (history.length && now - history[0].t > HISTORY_MS) history.shift();
+    showNote(n);
+    draw(now);
+  }
+  function draw(now) {
+    var dpr = window.devicePixelRatio || 1;
+    var w = canvas.clientWidth, h = canvas.clientHeight;
+    if (canvas.width !== Math.round(w * dpr) || canvas.height !== Math.round(h * dpr)) {
+      canvas.width = Math.round(w * dpr);
+      canvas.height = Math.round(h * dpr);
+    }
+    var g = canvas.getContext("2d");
+    g.setTransform(dpr, 0, 0, dpr, 0, 0);
+    g.clearRect(0, 0, w, h);
+    function y(midi) { return h - (midi - MIDI_LOW) / (MIDI_HIGH - MIDI_LOW) * h; }
+    g.font = "12px system-ui, sans-serif";
+    g.textBaseline = "middle";
+    for (var m = MIDI_LOW; m <= MIDI_HIGH; m++) {
+      var isC = m % 12 === 0;
+      g.strokeStyle = isC ? "#3a4855" : "#1c252d";
+      g.lineWidth = 1;
+      g.beginPath(); g.moveTo(0, y(m)); g.lineTo(w, y(m)); g.stroke();
+      if (isC && m < MIDI_HIGH) { g.fillStyle = "#8d9aa6"; g.fillText("C" + (m / 12 - 1), 4, y(m) - 8); }
+    }
+    g.strokeStyle = "#5ad1a4";
+    g.lineWidth = 3;
+    g.lineJoin = "round";
+    g.lineCap = "round";
+    var drawing = false, last = null;
+    g.beginPath();
+    history.forEach(function (pt) {
+      if (pt.midi === null || pt.midi < MIDI_LOW || pt.midi > MIDI_HIGH) { drawing = false; last = null; return; }
+      var x = w - (now - pt.t) / HISTORY_MS * w, py = y(pt.midi);
+      // A jump of more than an octave between two frames starts a new stroke.
+      if (!drawing || (last !== null && Math.abs(pt.midi - last) > 12)) { g.moveTo(x, py); drawing = true; }
+      else g.lineTo(x, py);
+      last = pt.midi;
+    });
+    g.stroke();
+  }
+
+  renderRecent();
+  draw(performance.now());
+})();
