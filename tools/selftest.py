@@ -204,7 +204,9 @@ def ui_tests(pw, tmp):
           external == [] and page.evaluate("window.__gum") == 0, str(external))
     check("headphones tip is shown", "請戴耳機" in tid(page, "headphones-tip").inner_text())
     check("1280x800: no horizontal scroll", page.evaluate("document.documentElement.scrollWidth <= document.documentElement.clientWidth"))
-    check("start button disabled before a video is loaded", tid(page, "start-button").is_disabled())
+    check("start button disabled before a video is loaded; page state is idle",
+          tid(page, "start-button").is_disabled() and page.get_attribute("body", "data-state") == "idle"
+          and tid(page, "note").get_attribute("data-voiced") == "false")
     SHOTS.mkdir(exist_ok=True)
     page.screenshot(path=str(SHOTS / "01_empty.png"), full_page=True)
 
@@ -258,6 +260,13 @@ def ui_tests(pw, tmp):
     tid(page, "load-button").click()
     page.wait_for_selector('[data-testid="start-button"]:not([disabled])')
     check("after an error, the next link loads and the message clears", tid(page, "message").inner_text() == "")
+    page.evaluate("KTV.app.handlePlayerError(150)")
+    check("error handler can be called directly; page state is error", page.get_attribute("body", "data-state") == "error"
+          and tid(page, "message").get_attribute("data-error-code") == "150")
+    tid(page, "load-button").click()
+    page.wait_for_selector('body[data-state="mic"]')
+    check("page state returns to mic after loading again; voiced reading carries note, freq and cents",
+          tid(page, "note").get_attribute("data-voiced") == "true" and tid(page, "note").get_attribute("data-cents") is not None)
     page.screenshot(path=str(SHOTS / "03_after_error_next_link.png"), full_page=True)
 
     page.evaluate("""() => { const l = []; for (let i = 0; i < 25; i++) l.push({id: ('v' + i + 'xxxxxxxxxxx').slice(0, 11), title: 'T' + i});
@@ -314,7 +323,7 @@ def ui_tests(pw, tmp):
     page.wait_for_selector('[data-testid="mic-help"]:not([hidden])', timeout=8000)
     check("microphone refused: video still told to play, help text explains how to allow it",
           page.evaluate("window.__fake.calls.includes('play')") and "重新允許" in tid(page, "mic-help").inner_text()
-          and tid(page, "mic-status").get_attribute("data-mic") == "off")
+          and tid(page, "mic-status").get_attribute("data-mic") == "off" and page.get_attribute("body", "data-state") == "denied")
     page.screenshot(path=str(SHOTS / "04_mic_refused.png"), full_page=True)
     check("no page errors (refused)", not errors, str(errors[:3]))
     ctx.close()

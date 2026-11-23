@@ -19,6 +19,13 @@
   var player = null, apiState = "none", pendingId = null, currentId = null;
   var audioCtx = null, analyser = null, micStream = null, buffer = null, rafId = 0;
   var history = [];                     // [{t, midi|null}]
+  var loaded = false, failed = false, denied = false;
+
+  // One readable page state: idle | loaded | mic | denied | error
+  function refreshState() {
+    var s = failed ? "error" : micStream ? "mic" : denied ? "denied" : loaded ? "loaded" : "idle";
+    document.body.setAttribute("data-state", s);
+  }
 
   // ---------- messages ---------------------------------------------------------
   function say(text) { message.textContent = text || ""; message.removeAttribute("data-error-code"); }
@@ -88,15 +95,19 @@
       events: { onReady: onReady, onError: onError, onStateChange: onStateChange }
     });
   }
-  function onReady() { startBtn.disabled = false; }
+  function onReady() { startBtn.disabled = false; loaded = true; refreshState(); }
   function onError(ev) {
-    var code = ev && ev.data;
+    handlePlayerError(ev && ev.data);
+  }
+  function handlePlayerError(code) {
     startBtn.disabled = true;
+    failed = true;
     if (code === 101 || code === 150) say("這支影片不允許嵌入，請換一支。");
     else if (code === 100) say("找不到這支影片（可能已移除或設為私人），請換一支。");
     else if (code === 2) say("這個連結的影片代碼無效，請換一支。");
     else say("這支影片無法播放（錯誤代碼 " + Number(code) + "），請換一支。");
     message.setAttribute("data-error-code", String(Number(code)));
+    refreshState();
     linkInput.focus();
     linkInput.select();
   }
@@ -109,9 +120,13 @@
   }
   function loadVideo(id) {
     currentId = id;
+    failed = false;
     say("");
+    refreshState();
     if (player && player.cueVideoById) {
       startBtn.disabled = false;
+      loaded = true;
+      refreshState();
       player.cueVideoById(id);
     } else {
       pendingId = id;
@@ -134,6 +149,7 @@
     micStatus.setAttribute("data-mic", on ? "on" : "off");
     micStatus.textContent = on ? "麥克風已開啟" : "麥克風未開啟";
     micOffBtn.hidden = !on;
+    refreshState();
   }
   function openMic() {
     if (micStream) return Promise.resolve(true);
@@ -150,6 +166,7 @@
       // to a recorder or to anything that leaves this page.
       audioCtx.createMediaStreamSource(stream).connect(analyser);
       buffer = new Float32Array(analyser.fftSize);
+      denied = false;
       setMic(true);
       micHelp.hidden = true;
       if (!rafId) rafId = requestAnimationFrame(tick);
@@ -173,6 +190,8 @@
     // The permission prompt appears only here, after the user presses the button.
     openMic().then(function (ok) {
       if (!ok) {
+        denied = true;
+        refreshState();
         micHelp.hidden = false;
         micHelp.textContent = "麥克風沒有開啟，影片照常播放，但不會有音高線。要重新允許：點網址列左邊的圖示 → 網站設定 → 麥克風 → 允許，再重新整理這個頁面。";
       }
@@ -185,14 +204,18 @@
     if (!n) {
       noteEl.textContent = "—";
       noteEl.setAttribute("data-note", "");
+      noteEl.setAttribute("data-voiced", "false");
       noteEl.removeAttribute("data-freq");
+      noteEl.removeAttribute("data-cents");
       centsEl.textContent = "";
       centsEl.removeAttribute("data-cents");
       return;
     }
     noteEl.textContent = n.label;
     noteEl.setAttribute("data-note", n.label);
+    noteEl.setAttribute("data-voiced", "true");
     noteEl.setAttribute("data-freq", n.freq.toFixed(2));
+    noteEl.setAttribute("data-cents", String(n.cents));
     centsEl.textContent = (n.cents > 0 ? "+" : "") + n.cents + " 音分";
     centsEl.setAttribute("data-cents", String(n.cents));
   }
@@ -245,6 +268,11 @@
     g.stroke();
   }
 
+  // For tests: the same function the player's onError event calls.
+  K.app = { handlePlayerError: handlePlayerError };
+
+  refreshState();
+  showNote(null);
   renderRecent();
   draw(performance.now());
 })();
