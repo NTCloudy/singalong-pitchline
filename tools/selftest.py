@@ -229,6 +229,13 @@ def songs_tests(pw):
                     scrolls: u.scrollHeight > u.clientHeight + 10, capped: u.getBoundingClientRect().height <= 420}; }""")
         check("song list: a very long title wraps in full (not cut off); 125 songs scroll inside the list area, whose height is capped",
               all(long.values()), str(long))
+        vis = page.evaluate("""() => { const els = [document.querySelector('[data-testid=songs-area] h2')].concat(Array.from(document.querySelectorAll('[data-testid=song-item]')).slice(0, 3));
+            const list = document.querySelector('[data-testid=songs]').getBoundingClientRect(), pb = document.querySelector('[data-testid=player-box]').getBoundingClientRect(), area = document.querySelector('[data-testid=songs-area]').getBoundingClientRect();
+            return {inView: els.every(e => { const r = e.getBoundingClientRect(); return r.top >= 0 && r.bottom <= window.innerHeight && r.height > 0 && r.left >= 0 && r.right <= window.innerWidth; }),
+                    inList: els.slice(1).every(e => { const r = e.getBoundingClientRect(); return r.top >= list.top - 1 && r.bottom <= list.bottom + 1; }),
+                    noOverlap: area.left >= pb.right || area.top >= pb.bottom, player: [pb.width, pb.height], scrollY: window.scrollY}; }""")
+        check(f"1280x800 without scrolling: heading and first 3 songs in view, beside the player without overlap (player {vis['player'][0]:.0f}x{vis['player'][1]:.0f})",
+              vis["inView"] and vis["inList"] and vis["noOverlap"] and vis["scrollY"] == 0 and vis["player"][0] >= 480 and vis["player"][1] >= 270, str(vis))
         check("song list: title and artist shown as plain text",
               items.nth(0).locator(".title").inner_text() == "<img src=x onerror=window.__xss=1><b>第一首</b>"
               and items.nth(0).locator(".artist").inner_text() == "<i>歌手甲</i>" and items.nth(1).locator(".artist").count() == 0
@@ -298,6 +305,9 @@ def ui_tests(pw, tmp):
     check("opening the page makes no third-party request and does not ask for the microphone",
           external == [] and page.evaluate("window.__gum") == 0, str(external))
     check("shipped song list is empty and says so", tid(page, "songs-empty").inner_text() == "歌單目前是空的" and tid(page, "song-item").count() == 0)
+    vis = page.evaluate("""() => ['[data-testid=songs-area] h2', '[data-testid=songs-empty]'].map(s => { const r = document.querySelector(s).getBoundingClientRect();
+        return r.top >= 0 && r.bottom <= window.innerHeight && r.left >= 0 && r.right <= window.innerWidth && r.height > 0; })""")
+    check("1280x800 without scrolling: song list heading and the empty note are in view", vis == [True, True] and page.evaluate("window.scrollY") == 0, str(vis))
     check("headphones tip is shown", "請戴耳機" in tid(page, "headphones-tip").inner_text())
     check("1280x800: no horizontal scroll", page.evaluate("document.documentElement.scrollWidth <= document.documentElement.clientWidth"))
     check("page state is idle; microphone button says 開啟麥克風",

@@ -27,6 +27,11 @@
 
   <section id="stage" class="stage" data-testid="stage">
     <div id="player-box" class="player-box" data-testid="player-box"><div id="player"></div></div>
+    <div class="songs" data-testid="songs-area">
+      <h2>歌單</h2>
+      <ul id="songs" data-testid="songs"></ul>
+      <p id="songs-empty" class="hint" data-testid="songs-empty">歌單目前是空的</p>
+    </div>
   </section>
 
   <section class="row controls">
@@ -39,12 +44,6 @@
     <div class="now"><span id="note" class="note" data-testid="note" data-note="">—</span><span id="cents" class="cents" data-testid="cents"></span></div>
     <canvas id="graph" data-testid="graph" width="1000" height="220" aria-label="即時音高線"></canvas>
     <p class="hint">音高線只畫你的聲音；麥克風的聲音只在這個瀏覽器裡即時分析，不錄音、不儲存、不上傳。</p>
-  </section>
-
-  <section class="songs" data-testid="songs-area">
-    <h2>歌單</h2>
-    <ul id="songs" data-testid="songs"></ul>
-    <p id="songs-empty" class="hint" data-testid="songs-empty">歌單目前是空的</p>
   </section>
 
   <section class="recent">

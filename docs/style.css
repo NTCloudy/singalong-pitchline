@@ -18,9 +18,11 @@ button.secondary { background: transparent; color: var(--accent); }
 button:disabled { opacity: 0.5; cursor: not-allowed; }
 button:focus-visible, input:focus-visible { outline: 3px solid #fff; outline-offset: 2px; }
 .message { margin: 6px 0 0; min-height: 1.6em; color: var(--warn); }
-.stage { margin-top: 10px; }
+/* Player on the left, song list beside it. They sit side by side and never overlap;
+   on a narrow window the list drops below the player. */
+.stage { margin-top: 10px; display: flex; flex-wrap: wrap; align-items: flex-start; gap: 16px; }
 /* The player has this box to itself. Nothing else is ever positioned over it. */
-.player-box { width: 640px; height: 360px; min-width: 480px; min-height: 270px; max-width: 100%; margin: 0 auto; background: #000; border: 1px solid var(--border); }
+.player-box { width: 640px; height: 360px; min-width: 480px; min-height: 270px; max-width: 100%; flex: none; background: #000; border: 1px solid var(--border); }
 .player-box iframe, .player-box > div { display: block; width: 100%; height: 100%; border: 0; }
 .controls { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; }
 .mic-status { color: var(--muted); }
@@ -33,9 +35,9 @@ canvas { display: block; width: 100%; height: 220px; background: #0b0f12; border
 .hint { margin: 6px 0 0; color: var(--muted); }
 .recent { margin: 16px 0 40px; }
 .recent-head { display: flex; align-items: center; justify-content: space-between; }
-.songs { margin: 16px 0 0; }
+.songs { flex: 1 1 260px; min-width: 0; }
 /* Many songs scroll inside this box; it never grows over the rest of the page. */
-.songs ul { list-style: none; margin: 8px 0 0; padding: 0 4px 0 0; display: grid; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); gap: 6px; max-height: 320px; overflow-y: auto; }
+.songs ul { list-style: none; margin: 8px 0 0; padding: 0 4px 0 0; display: grid; grid-template-columns: 1fr; gap: 6px; max-height: 322px; overflow-y: auto; }
 .songs li { min-width: 0; }
 .songs .artist { color: var(--muted); margin-left: 8px; }
 /* Long titles and artists wrap in full; they are never cut off. */
