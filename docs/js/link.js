@@ -27,5 +27,20 @@
     return id && ID.test(id) ? id : null;
   }
 
-  K.link = { videoId: videoId };
+  /* songList(raw) -> [{title, artist, id}] with every malformed entry dropped.
+   * Anything that is not an array counts as an empty list. */
+  function songList(raw) {
+    if (!Array.isArray(raw)) return [];
+    var out = [];
+    raw.forEach(function (s) {
+      if (!s || typeof s !== "object") return;
+      if (typeof s.title !== "string" || typeof s.artist !== "string" || typeof s.id !== "string") return;
+      var title = s.title.trim();
+      if (!title || !ID.test(s.id)) return;
+      out.push({ title: title, artist: s.artist.trim(), id: s.id });
+    });
+    return out;
+  }
+
+  K.link = { videoId: videoId, songList: songList };
 })();

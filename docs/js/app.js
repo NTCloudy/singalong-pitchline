@@ -274,11 +274,40 @@
     g.stroke();
   }
 
+  // ---------- song list (docs/js/songs.js) ---------------------------------------
+  function renderSongs() {
+    var list = K.link.songList(K.songs);       // a missing or broken file counts as an empty list
+    var ul = $("songs");
+    list.forEach(function (song) {
+      var li = document.createElement("li");
+      var b = document.createElement("button");
+      b.type = "button";
+      b.setAttribute("data-testid", "song-item");
+      b.setAttribute("data-video-id", song.id);
+      var title = document.createElement("span");
+      title.className = "title";
+      title.textContent = song.title;
+      b.appendChild(title);
+      if (song.artist) {
+        var artist = document.createElement("span");
+        artist.className = "artist";
+        artist.textContent = song.artist;
+        b.appendChild(artist);
+      }
+      // Same as pasting the link: load the video, and remember it under the list's title.
+      b.addEventListener("click", function () { nameInput.value = song.title; loadVideo(song.id, song.title); });
+      li.appendChild(b);
+      ul.appendChild(li);
+    });
+    $("songs-empty").hidden = list.length > 0;
+  }
+
   // For tests: the same function the player's onError event calls.
   K.app = { handlePlayerError: handlePlayerError };
 
   refreshState();
   showNote(null);
+  renderSongs();
   renderRecent();
   draw(performance.now());
 })();

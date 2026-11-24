@@ -176,6 +176,89 @@ def logic_tests(page):
           got == list(good.values()) + [None] * len(bad_links), str(got))
 
 
+    raw = [{"title": "好歌", "artist": "某人", "id": "abcdefghijk"}, {"title": " 沒歌手 ", "artist": "", "id": "ABC_def-123"},
+           {"title": "", "artist": "x", "id": "abcdefghijk"}, {"title": "短代碼", "artist": "x", "id": "abc"},
+           {"title": "壞代碼", "artist": "x", "id": "abc<efghijk"}, {"title": "缺歌手", "id": "abcdefghijk"},
+           {"title": 5, "artist": "x", "id": "abcdefghijk"}, {"title": "數字代碼", "artist": "x", "id": 12345678901},
+           None, "text", 7, [], {"artist": "x", "id": "abcdefghijk"}, {"title": "   ", "artist": "x", "id": "abcdefghijk"}]
+    got = page.evaluate("r => KTV.link.songList(r)", raw)
+    check("song list: malformed entries are skipped, valid ones kept",
+          got == [{"title": "好歌", "artist": "某人", "id": "abcdefghijk"}, {"title": "沒歌手", "artist": "", "id": "ABC_def-123"}], str(got))
+    check("song list: a missing or non-array file counts as empty",
+          page.evaluate("[undefined, null, 'x', 5, {}].every(v => KTV.link.songList(v).length === 0)"))
+
+
+SONGS_JS = """(function () { var K = (window.KTV = window.KTV || {}); K.songs = [
+  {title: "<img src=x onerror=window.__xss=1><b>第一首</b>", artist: "<i>歌手甲</i>", id: "SONG1xxxxxx"},
+  {title: "禁止嵌入的歌", artist: "", id: "ERR150xxxxx"},
+  {title: "壞的", artist: "x", id: "short"}, 42,
+  {title: "第三首", artist: "歌手丙", id: "SONG3xxxxxx"},
+  {title: "第三首（同一支影片再列一次）", artist: "歌手丙", id: "SONG3xxxxxx"},
+  {title: "很長的歌名".repeat(30), artist: "很長的歌手名".repeat(20), id: "LONGxxxxxxx"}
+].concat(Array.from({length: 120}, function (_, i) { return {title: "第 " + i + " 首", artist: "", id: ("N" + i + "xxxxxxxxxx").slice(0, 11)}; })); })();"""
+
+
+def songs_tests(pw):
+    """The list file is replaced in the test browser; the shipped file stays empty."""
+    browser = pw.chromium.launch(args=["--use-fake-device-for-media-stream", "--use-fake-ui-for-media-stream"])
+    for label, body, status in (("three valid songs", SONGS_JS, 200), ("broken file", "K.songs = [ {{{ syntax error", 200),
+                                ("file missing", "", 404), ("not an array", "window.KTV = window.KTV || {}; KTV.songs = 'oops';", 200)):
+        external = []
+        ctx, page, errors = new_page(browser, external)
+        def serve_songs(route, _body=body, _status=status):
+            route.fulfill(status=_status, content_type="text/javascript", body=_body)
+        page.route("**/docs/js/songs.js", lambda route: serve_songs(route))
+        page.goto(BASE + "/docs/")
+        if label != "three valid songs":
+            check(f"song list, {label}: shown as empty, the rest of the page still works",
+                  tid(page, "songs-empty").is_visible() and tid(page, "song-item").count() == 0
+                  and page.get_attribute("body", "data-state") == "idle" and tid(page, "mic-button").is_enabled()
+                  and tid(page, "songs-empty").inner_text() == "歌單目前是空的")
+            tid(page, "link-input").fill("https://youtu.be/AAAAAAAAAAA")
+            tid(page, "load-button").click()
+            page.wait_for_selector('body[data-state="loaded"]')
+            ctx.close()
+            continue
+        items = tid(page, "song-item")
+        check("song list: valid entries shown in order, malformed ones skipped, empty note hidden",
+              [items.nth(i).get_attribute("data-video-id") for i in range(5)] == ["SONG1xxxxxx", "ERR150xxxxx", "SONG3xxxxxx", "SONG3xxxxxx", "LONGxxxxxxx"]
+              and items.count() == 125 and not tid(page, "songs-empty").is_visible())
+        long = page.evaluate("""() => { const b = document.querySelector('[data-video-id="LONGxxxxxxx"]'), t = b.querySelector('.title');
+            const r = b.getBoundingClientRect(), u = document.querySelector('[data-testid=songs]');
+            return {full: t.textContent.length === 150 && t.scrollWidth <= t.clientWidth + 1, tall: r.height > 60, inside: r.right <= document.documentElement.clientWidth,
+                    scrolls: u.scrollHeight > u.clientHeight + 10, capped: u.getBoundingClientRect().height <= 420}; }""")
+        check("song list: a very long title wraps in full (not cut off); 125 songs scroll inside the list area, whose height is capped",
+              all(long.values()), str(long))
+        check("song list: title and artist shown as plain text",
+              items.nth(0).locator(".title").inner_text() == "<img src=x onerror=window.__xss=1><b>第一首</b>"
+              and items.nth(0).locator(".artist").inner_text() == "<i>歌手甲</i>" and items.nth(1).locator(".artist").count() == 0
+              and page.evaluate("window.__xss === undefined") and page.locator('[data-testid="songs"] img, [data-testid="songs"] b, [data-testid="songs"] i').count() == 0)
+        check("song list: showing it makes no request", external == [], str(external))
+        check("song list: 1280x800 no horizontal scroll", page.evaluate("document.documentElement.scrollWidth <= document.documentElement.clientWidth"))
+        items.nth(2).click()
+        page.wait_for_selector('body[data-state="loaded"]')
+        check("clicking a song loads that video like a pasted link (one request: YouTube's player script)",
+              page.evaluate("window.__fake.id") == "SONG3xxxxxx" and external == ["https://www.youtube.com/iframe_api"], str(external))
+        # Points outside the viewport cannot be probed, so bring the player into view first.
+        over = page.evaluate("""() => { window.scrollTo(0, 0); const p = document.querySelector('#player').getBoundingClientRect(); let hit = 0;
+            if (p.top < 0 || p.bottom > window.innerHeight) return -1;
+            for (let x = p.left + 5; x < p.right; x += 40) for (let y = p.top + 5; y < p.bottom; y += 40) if (document.elementFromPoint(x, y) !== document.querySelector('#player')) hit++;
+            return hit; }""")
+        check("song list does not cover the player", over == 0)
+        page.evaluate("window.__fake.playVideo()")
+        page.wait_for_selector('[data-testid="recent-item"]')
+        check("played song is recorded in the recent list under the list's title",
+              tid(page, "recent-item").first.inner_text() == "第三首" and tid(page, "recent-item").first.get_attribute("data-video-id") == "SONG3xxxxxx")
+        items.nth(1).click()
+        page.wait_for_selector('[data-testid="message"]:not(:empty)')
+        check("a listed song that forbids embedding shows the usual message", tid(page, "message").inner_text() == "這支影片不允許嵌入，請換一支")
+        SHOTS.mkdir(exist_ok=True)
+        page.screenshot(path=str(SHOTS / "06_song_list.png"), full_page=True)
+        check("song list: no page errors", not errors, str(errors[:3]))
+        ctx.close()
+    browser.close()
+
+
 def new_page(browser, external, allow_youtube=False, size=(1280, 800)):
     ctx = browser.new_context(viewport={"width": size[0], "height": size[1]})
     page = ctx.new_page()
@@ -214,6 +297,7 @@ def ui_tests(pw, tmp):
     page.goto(BASE + "/docs/")
     check("opening the page makes no third-party request and does not ask for the microphone",
           external == [] and page.evaluate("window.__gum") == 0, str(external))
+    check("shipped song list is empty and says so", tid(page, "songs-empty").inner_text() == "歌單目前是空的" and tid(page, "song-item").count() == 0)
     check("headphones tip is shown", "請戴耳機" in tid(page, "headphones-tip").inner_text())
     check("1280x800: no horizontal scroll", page.evaluate("document.documentElement.scrollWidth <= document.documentElement.clientWidth"))
     check("page state is idle; microphone button says 開啟麥克風",
@@ -416,6 +500,7 @@ def main():
             logic_tests(page)
             browser.close()
             fake_mic = ui_tests(pw, tmp)
+            songs_tests(pw)
             if "--youtube" in sys.argv:
                 youtube_test(pw, fake_mic)
     finally:

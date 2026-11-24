@@ -41,6 +41,12 @@
     <p class="hint">音高線只畫你的聲音；麥克風的聲音只在這個瀏覽器裡即時分析，不錄音、不儲存、不上傳。</p>
   </section>
 
+  <section class="songs" data-testid="songs-area">
+    <h2>歌單</h2>
+    <ul id="songs" data-testid="songs"></ul>
+    <p id="songs-empty" class="hint" data-testid="songs-empty">歌單目前是空的</p>
+  </section>
+
   <section class="recent">
     <div class="recent-head">
       <h2>最近唱過</h2>
@@ -52,6 +58,7 @@
 </main>
 <script src="js/pitch.js"></script>
 <script src="js/link.js"></script>
+<script src="js/songs.js"></script>
 <script src="js/app.js"></script>
 </body>
 </html>
