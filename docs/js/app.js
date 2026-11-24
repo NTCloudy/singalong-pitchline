@@ -16,7 +16,10 @@
   var noteEl = $("note"), centsEl = $("cents"), canvas = $("graph");
   var recentList = $("recent"), recentEmpty = $("recent-empty"), clearBtn = $("clear-recent");
 
-  var player = null, apiState = "none", pendingId = null, currentId = null, currentName = "";
+  // playerState: "none" (not created) -> "creating" (waiting for YouTube's onReady) -> "ready".
+  // The player object only has its methods once it is ready, so until then a newly chosen
+  // video is just remembered in currentId and applied in onReady.
+  var player = null, apiState = "none", playerState = "none", shownId = null, currentId = null, currentName = "";
   var audioCtx = null, analyser = null, micStream = null, buffer = null, rafId = 0;
   var history = [];                     // [{t, midi|null}]
   var loaded = false, failed = false, denied = false;
@@ -80,7 +83,7 @@
     apiState = "loading";
     window.onYouTubeIframeAPIReady = function () {
       apiState = "ready";
-      if (pendingId) createPlayer(pendingId);
+      if (currentId) createPlayer();
     };
     var s = document.createElement("script");
     s.src = "https://www.youtube.com/iframe_api";
@@ -90,15 +93,23 @@
     };
     document.head.appendChild(s);
   }
-  function createPlayer(id) {
-    pendingId = null;
+  function createPlayer() {
+    if (playerState !== "none") return;          // never build a second player
+    playerState = "creating";
+    shownId = currentId;
     player = new window.YT.Player("player", {
-      width: "640", height: "360", videoId: id,
+      width: "560", height: "315", videoId: shownId,
       playerVars: { playsinline: 1, rel: 0 },
       events: { onReady: onReady, onError: onError, onStateChange: onStateChange }
     });
   }
-  function onReady() { loaded = true; refreshState(); }
+  function onReady() {
+    playerState = "ready";
+    loaded = true;
+    // Another song may have been chosen while the player was still starting up.
+    if (currentId && currentId !== shownId) { shownId = currentId; player.cueVideoById(currentId); }
+    refreshState();
+  }
   function onError(ev) {
     handlePlayerError(ev && ev.data);
   }
@@ -122,15 +133,13 @@
     currentName = name || "";
     failed = false;
     say("");
-    refreshState();
-    if (player && player.cueVideoById) {
-      loaded = true;
-      refreshState();
+    if (playerState === "ready") {
+      shownId = id;
       player.cueVideoById(id);       // only the video id is passed: no start time, no playlist
-    } else {
-      pendingId = id;
-      if (apiState === "ready") createPlayer(id); else loadApi();
-    }
+    } else if (playerState === "none") {
+      if (apiState === "ready") createPlayer(); else loadApi();
+    }                                // "creating": onReady picks up currentId
+    refreshState();
   }
   function onLoadClick() {
     var id = K.link.videoId(linkInput.value);
@@ -201,7 +210,7 @@
           : "麥克風沒有開啟。影片照常播放，但不會有音高線。要重新允許：點網址列左邊的圖示 → 網站設定 → 麥克風 → 允許，再重新整理這個頁面。";
       }
       // The song starts once the microphone question is settled, whatever the answer was.
-      if (player && player.playVideo && loaded && !failed) player.playVideo();
+      if (playerState === "ready" && !failed) player.playVideo();
     });
   });
 

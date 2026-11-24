@@ -73,25 +73,63 @@ def stop_server(proc):
 # A stand-in for YouTube's script, used so that most checks need no network at all.
 FAKE_API = r"""
 (function () {
+  // Like the real player: the object has no methods until onReady has fired (after a delay).
+  window.__players = 0;
   function Player(id, opts) {
     var self = this, holder = document.getElementById(id), frame = document.createElement('iframe');
     frame.id = id; frame.width = opts.width; frame.height = opts.height; frame.setAttribute('data-fake-player', '1');
     holder.parentNode.replaceChild(frame, holder);
+    window.__players++;
     this.opts = opts; this.id = opts.videoId; this.calls = [];
     window.__fake = this;
     this.emit = function (name, data) { if (opts.events[name]) opts.events[name]({data: data, target: self}); };
-    this.cue = function (vid) { self.id = vid; self.calls.push('cue:' + vid);
+    function cue(vid) { self.id = vid; self.calls.push('cue:' + vid);
       if (vid.indexOf('ERR101') === 0) setTimeout(function () { self.emit('onError', 101); }, 0);
       else if (vid.indexOf('ERR150') === 0) setTimeout(function () { self.emit('onError', 150); }, 0);
-      else if (vid.indexOf('ERR100') === 0) setTimeout(function () { self.emit('onError', 100); }, 0); };
-    setTimeout(function () { self.emit('onReady'); self.cue(opts.videoId); }, 0);
+      else if (vid.indexOf('ERR100') === 0) setTimeout(function () { self.emit('onError', 100); }, 0); }
+    setTimeout(function () {
+      self.cueVideoById = function (vid) { cue(vid); };
+      self.playVideo = function () { self.calls.push('play'); self.emit('onStateChange', 1); };
+      cue(opts.videoId);
+      self.emit('onReady');
+    }, window.__readyDelay === undefined ? 300 : window.__readyDelay);
   }
-  Player.prototype.cueVideoById = function (vid) { this.cue(vid); };
-  Player.prototype.playVideo = function () { this.calls.push('play'); this.emit('onStateChange', 1); };
   window.YT = {Player: Player, PlayerState: {PLAYING: 1}};
   if (window.onYouTubeIframeAPIReady) window.onYouTubeIframeAPIReady();
 })();
 """
+
+
+def switch_tests(pw):
+    """D-K1: choosing other songs before the player is ready must end on the last one chosen."""
+    browser = pw.chromium.launch()
+    for label, api_delay in (("while the player is starting", 0), ("while YouTube's script is still loading", 600)):
+        external = []
+        ctx, page, errors = new_page(browser, external, api_delay_ms=api_delay)
+        page.add_init_script("window.__readyDelay = 800;")
+        page.goto(BASE + "/docs/")
+        for vid in ("AAAAAAAAAAA", "BBBBBBBBBBB", "CCCCCCCCCCC"):
+            tid(page, "link-input").fill("https://youtu.be/" + vid)
+            tid(page, "name-input").fill("歌 " + vid[0])
+            tid(page, "load-button").click()
+            page.wait_for_timeout(150)
+        state_before = page.get_attribute("body", "data-state")
+        page.wait_for_selector('body[data-state="loaded"]')
+        got = page.evaluate("[window.__fake.id, window.__players, window.__fake.calls.join()]")
+        check(f"three songs chosen {label}: one player, it ends on the last song, page was not 'loaded' early",
+              got[0] == "CCCCCCCCCCC" and got[1] == 1 and state_before == "idle", str((got, state_before)))
+        page.evaluate("window.__fake.playVideo()")
+        page.wait_for_selector('[data-testid="recent-item"]')
+        check(f"  ... and the recent list records the song that is actually showing ({label})",
+              tid(page, "recent-item").first.get_attribute("data-video-id") == "CCCCCCCCCCC" and tid(page, "recent-item").first.inner_text() == "歌 C")
+        seq = ["D" * 11, "E" * 11, "F" * 11]
+        for vid in seq:
+            tid(page, "link-input").fill("https://youtu.be/" + vid)
+            tid(page, "load-button").click()
+        check(f"  ... after that, switching songs keeps working ({label})", page.evaluate("[window.__fake.id, window.__players]") == ["F" * 11, 1])
+        check(f"  ... no page errors ({label})", not errors, str(errors[:3]))
+        ctx.close()
+    browser.close()
 
 
 def logic_tests(page):
@@ -236,6 +274,8 @@ def songs_tests(pw):
                     noOverlap: area.left >= pb.right || area.top >= pb.bottom, player: [pb.width, pb.height], scrollY: window.scrollY}; }""")
         check(f"1280x800 without scrolling: heading and first 3 songs in view, beside the player without overlap (player {vis['player'][0]:.0f}x{vis['player'][1]:.0f})",
               vis["inView"] and vis["inList"] and vis["noOverlap"] and vis["scrollY"] == 0 and vis["player"][0] >= 480 and vis["player"][1] >= 270, str(vis))
+        v = first_screen(page)
+        check("1280x800 first screen with a 125-song list: player, note name and pitch graph still fully in view", first_screen_ok(v), str(v))
         check("song list: title and artist shown as plain text",
               items.nth(0).locator(".title").inner_text() == "<img src=x onerror=window.__xss=1><b>第一首</b>"
               and items.nth(0).locator(".artist").inner_text() == "<i>歌手甲</i>" and items.nth(1).locator(".artist").count() == 0
@@ -244,6 +284,7 @@ def songs_tests(pw):
         check("song list: 1280x800 no horizontal scroll", page.evaluate("document.documentElement.scrollWidth <= document.documentElement.clientWidth"))
         items.nth(2).click()
         page.wait_for_selector('body[data-state="loaded"]')
+        page.wait_for_function("() => window.__fake && window.__fake.id === 'SONG3xxxxxx'")
         check("clicking a song loads that video like a pasted link (one request: YouTube's player script)",
               page.evaluate("window.__fake.id") == "SONG3xxxxxx" and external == ["https://www.youtube.com/iframe_api"], str(external))
         # Points outside the viewport cannot be probed, so bring the player into view first.
@@ -266,7 +307,7 @@ def songs_tests(pw):
     browser.close()
 
 
-def new_page(browser, external, allow_youtube=False, size=(1280, 800)):
+def new_page(browser, external, allow_youtube=False, size=(1280, 800), api_delay_ms=0):
     ctx = browser.new_context(viewport={"width": size[0], "height": size[1]})
     page = ctx.new_page()
     errors = []
@@ -279,12 +320,28 @@ def new_page(browser, external, allow_youtube=False, size=(1280, 800)):
             return r.continue_()
         external.append(r.request.url)
         if not allow_youtube and r.request.url == "https://www.youtube.com/iframe_api":
+            if api_delay_ms:
+                time.sleep(api_delay_ms / 1000)
             return r.fulfill(status=200, content_type="text/javascript", body=FAKE_API)
         if allow_youtube and any(host == h or host.endswith("." + h) for h in YT_HOSTS):
             return r.continue_()
         return r.abort()
     ctx.route("**/*", route)
     return ctx, page, errors
+
+
+def first_screen(page):
+    """At 1280x800 without scrolling: player, note name and pitch graph all fully in view."""
+    return page.evaluate("""() => { const out = {scrollY: window.scrollY};
+        for (const [k, s] of [['player', '[data-testid=player-box]'], ['note', '[data-testid=note]'], ['graph', '[data-testid=graph]']]) {
+          const r = document.querySelector(s).getBoundingClientRect();
+          out[k] = r.height > 0 && r.top >= 0 && r.left >= 0 && r.bottom <= window.innerHeight && r.right <= window.innerWidth; }
+        const p = document.querySelector('[data-testid=player-box]').getBoundingClientRect(), g = document.querySelector('[data-testid=graph]').getBoundingClientRect();
+        out.size = p.width >= 480 && p.height >= 270; out.below = g.top >= p.bottom; out.graphH = g.height; return out; }""")
+
+
+def first_screen_ok(v):
+    return v["scrollY"] == 0 and v["player"] and v["note"] and v["graph"] and v["size"] and v["below"] and v["graphH"] >= 120
 
 
 def tid(page, name):
@@ -304,10 +361,14 @@ def ui_tests(pw, tmp):
     page.goto(BASE + "/docs/")
     check("opening the page makes no third-party request and does not ask for the microphone",
           external == [] and page.evaluate("window.__gum") == 0, str(external))
-    check("shipped song list is empty and says so", tid(page, "songs-empty").inner_text() == "歌單目前是空的" and tid(page, "song-item").count() == 0)
-    vis = page.evaluate("""() => ['[data-testid=songs-area] h2', '[data-testid=songs-empty]'].map(s => { const r = document.querySelector(s).getBoundingClientRect();
-        return r.top >= 0 && r.bottom <= window.innerHeight && r.left >= 0 && r.right <= window.innerWidth && r.height > 0; })""")
-    check("1280x800 without scrolling: song list heading and the empty note are in view", vis == [True, True] and page.evaluate("window.scrollY") == 0, str(vis))
+    shipped = page.evaluate("[KTV.songs.length, KTV.link.songList(KTV.songs).length, new Set(KTV.songs.map(s => s.id)).size]")
+    check(f"shipped song list: {shipped[0]} entries, all well-formed, no repeated video, all shown",
+          shipped[0] > 0 and shipped[0] == shipped[1] == shipped[2] == tid(page, "song-item").count() and not tid(page, "songs-empty").is_visible(), str(shipped))
+    vis = page.evaluate("""() => [document.querySelector('[data-testid=songs-area] h2')].concat(Array.from(document.querySelectorAll('[data-testid=song-item]')).slice(0, 3)).map(e => {
+        const r = e.getBoundingClientRect(); return r.top >= 0 && r.bottom <= window.innerHeight && r.left >= 0 && r.right <= window.innerWidth && r.height > 0; })""")
+    check("1280x800 without scrolling: song list heading and the first 3 shipped songs are in view", vis == [True] * 4 and page.evaluate("window.scrollY") == 0, str(vis))
+    v = first_screen(page)
+    check("1280x800 first screen (nothing loaded): player box, note name and pitch graph all fully in view", first_screen_ok(v), str(v))
     check("headphones tip is shown", "請戴耳機" in tid(page, "headphones-tip").inner_text())
     check("1280x800: no horizontal scroll", page.evaluate("document.documentElement.scrollWidth <= document.documentElement.clientWidth"))
     check("page state is idle; microphone button says 開啟麥克風",
@@ -352,6 +413,8 @@ def ui_tests(pw, tmp):
         const g = document.querySelector('[data-testid=pitch-area]').getBoundingClientRect();
         return {hit, total: pts.length, below: g.top >= p.bottom}; }""")
     check(f"nothing covers the player ({over['total']} sample points) and the pitch area is below it", over["hit"] == 0 and over["below"], str(over))
+    v = first_screen(page)
+    check("1280x800 first screen while singing: player, note name and pitch graph all fully in view, graph below the player", first_screen_ok(v), str(v))
     check("1280x800 with player: no horizontal scroll", page.evaluate("document.documentElement.scrollWidth <= document.documentElement.clientWidth"))
     page.screenshot(path=str(SHOTS / "02_singing_a440_standin_player.png"), full_page=True)
 
@@ -511,6 +574,7 @@ def main():
             browser.close()
             fake_mic = ui_tests(pw, tmp)
             songs_tests(pw)
+            switch_tests(pw)
             if "--youtube" in sys.argv:
                 youtube_test(pw, fake_mic)
     finally:
